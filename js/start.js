@@ -2,8 +2,11 @@
 
 import packageJson from '../package.json'
 import React from 'react'
-import SimplePeer from 'simple-peer'
+import ReactDOM from 'react-dom/client'
 import { v4 as uuidv4 } from 'uuid'
+import { FileSharingPanel } from './FileSharingPanel'
+import { FileTransfer } from './FileTransfer'
+import { formatFileSize } from './utils'
 
 export default class FileSharingPlugin {
 
@@ -12,17 +15,23 @@ export default class FileSharingPlugin {
     name            = packageJson.metapress?.name || packageJson.name
     description     = packageJson.metapress?.description || packageJson.description
     version         = packageJson.version
-    provides        = [ ]
-    requires        = [ 'menubar', 'avatars', 'messaging' ]
+    provides        = [ 'fileSharing' ]
+    requires        = [ 'menubar', 'etherealStorage' ]
 
-    /** List of selected avatars to send the file to */
-    selectedAvatars = []
+    /** @type {File[]} List of shared files */
+    sharedFiles = []
 
-    /** The file to send */
-    file= null
+    /** @type {FileTransfer[]} Active transfers */
+    transfers = []
 
-    /** The peer connections list */
-    p2pConnections = {}
+    // /** List of selected avatars to send the file to */
+    // selectedAvatars = []
+
+    // /** The file to send */
+    // file= null
+
+    // /** The peer connections list */
+    // p2pConnections = {}
 
     // fileBuffer = []
 
@@ -31,268 +40,260 @@ export default class FileSharingPlugin {
 
         // Create menu item
         metapress.entities.add({
+            id: `fileSharing:menuButton`,
             type: 'menubar.item',
             name: 'File Sharing',
             icon: require('./images/file-sharer-icon.png'),
-            onClick: () => metapress.menubar.openReactPanel('file-sharing-menu', this.openFileSharePanel)
+            onClick: () => this.togglePanel()
         })
 
     }
 
-    // Receive a message
-    $onIncomingMessage(msg) {
-        if (msg.name == 'fileshare.plugin.signal') {
-            console.log('Received Message: ', msg, this.p2pConnections)
-        }
+    /** Render the panel */
+    showPanel() {
+
+        // Open React panel
+        metapress.menubar.openPanel({
+            id: this.id + ':panel',
+            onOpen: (panel, div) => {
+
+                // Create UI
+                panel.root = ReactDOM.createRoot(div)
+                panel.root.render(<FileSharingPanel />)
+
+            },
+            onClose: (panel, div) => {
+
+                // Unmount it
+                panel.root.unmount()
+
+            }
+        })
+
     }
 
-    /** Called when user is dragging a file */
-    onDragOverHandler = e => {
-        e.preventDefault()
-        e.dataTransfer.dropEffect = 'copy'
+    /** Toggle panel */
+    togglePanel() {
+
+        // Close if currently open
+        if (metapress.menubar.openPanelID == `${this.id}:panel`)
+            metapress.menubar.closePanel()
+        else
+            this.showPanel()
+
     }
 
-    /** Called when user drop a file */
-    onDropHandler = e => {
-        e.preventDefault()
+    /** Share a file with everyone in the world */
+    shareFile(file) {
 
-        const fileArr = e.dataTransfer.files
-        this.handleFiles(fileArr)
-    }
-
-    /** Called when file is selected */
-    handleFiles = files => {
-        // Stop if more than 1 file is uploaded
-        if (files.length > 1) {
-            metapress.menubar.toasts.show({ id: 'file.sharer.plugin.error', text: 'You can only share one file at a time!' })
+        // Check if file is already shared
+        if (this.sharedFiles.find(f => f.name === file.name && f.size === file.size))
             return
+
+        // Generate unique ID for this file
+        if (!file.uuid)
+            file.uuid = uuidv4()
+
+        // Add to the list
+        this.sharedFiles.push(file)
+
+        // Create file info
+        let fileInfo = {
+            uuid: file.uuid,
+            name: file.name,
+            size: file.size,
+            type: file.type,
+            date: Date.now(),
+            owner: metapress.instanceID,
+            ownerName: metapress.profile.get('name'),
         }
 
-        this.file = files[0]
+        // Store it in ethereal storage
+        metapress.etherealStorage.set(`sharedFiles/${file.uuid}`, fileInfo)
 
-        // if using MQTT to create a new peer connection won't need that
-        // const maxFileSize = 16 * 1024 // 16 KB
+        // Send an alert to notify everyone
+        metapress.messaging.send('global', 'fileSharing.fileShared', fileInfo)
 
-        // if (this.file.size > maxFileSize) {
-        //     this.splitFile(maxFileSize)
-        // }
-
-        // close the initial panel and show the send file UI
-        metapress.menubar.closePanel()
-        metapress.menubar.openReactPanel('file-sharing-sending-menu', this.sendFileUI)
-    
     }
 
-    // if using MQTT to create a new peer connection won't need that
-    /** Split the file into chunks */
-    // async splitFile(maxFileSize) {
-    //     const fileReader = new FileReader()
-    //     let size = 0
+    /** Called to remove the specified file from file sharing. Can only remove files you've shared yourself. */
+    stopSharing(uuid) {
 
-    //     do {
-    //         const fileChunk = this.file.slice(size, size + maxFileSize)
-    //         const buffer = await fileChunk.arrayBuffer()
+        // Find the file
+        const file = this.sharedFiles.find(f => f.uuid === uuid)
+        if (!file)
+            return
 
-    //         const data = { type: 'file', name: this.file.name, size: this.file.size, chunk: Array.from(new Uint8Array(buffer)), size }
-    //         this.fileBuffer.push(data)
-    //         // increment
-    //         size += maxFileSize
+        // Remove it
+        this.sharedFiles = this.sharedFiles.filter(f => f.uuid !== uuid)
 
-    //     } while (size < this.file.size)
+        // Remove from ethereal storage
+        metapress.etherealStorage.set(`sharedFiles/${uuid}`, null)
+
+    }
+
+    /** Called when the ethereal storage is updated */
+    $etherealStorage_itemUpdated(item) {
         
-    // }
-
-    /** Open file sharing panel -> dropzone first */
-    openFileSharePanel = () => {
-        return <PanelContainer title='File Sharer' onClose={() => metapress.menubar.closePanel() } >
-
-            <div style={{ fontSize: 14, fontWeight: 'bold', margin: '25px 20px' }}> Upload a File: </div>
-
-            {/** create a dropZone */}
-            <div id="dropzone" onDragOver={e => this.onDragOverHandler(e)} onDrop={ e => this.onDropHandler(e)} style={{ position: 'absolute', top: 30, margin: '30px 40px', width: 'calc(100% - 90px)', height: '300px', border: '2px dashed #858383', textAlign: 'center', cursor: 'pointer' }} >
-                
-                <img draggable='false' src={require('./images/upload-file.png')} style={{ width: 40, height: 40, margin: '50px auto 10px auto', justifyContent: 'center' }} />
-                
-                <div style={{ fontSize: 13, margin: '10px auto', flex: '1 1 1px' }}>
-                    Drag & Drop a file <br/>
-                    or <br/>
-                    <p onClick={() => document.getElementById('file-input').click()} style={{ fontWeight: 'bold', cursor: 'pointer', textDecoration: 'underline', margin: 'auto' }}> Browse a file </p>
-                </div>
-                
-                <input type="file" id="file-input" onChange={e => this.handleFiles(e.target.files)} style={{ display: 'none' }} />
-            </div>
-        </PanelContainer>
-   
-    }
-
-    /** Called to update the selected avatars */
-    updateSelectedAvatars(avatar, index) {
-
-        // Update checkbox fields
-        if (document.getElementById(index).style.backgroundImage.includes('icon-checked')) {
-            // uncheck the checkbox
-            document.getElementById(index).style.backgroundImage = `url(${require('./images/icon-unchecked.svg')})`
-            const sendList = this.selectedAvatars.filter(user => user.avatarID !== avatar.avatarID)
-            this.selectedAvatars = sendList
-        }
-        else {
-            // check the checkbox
-            document.getElementById(index).style.backgroundImage = `url(${require('./images/icon-checked.svg')})`
-            this.selectedAvatars.push(avatar)
-        }
-
-    }
-
-    /** Called when the send button is triggered */
-    onSendHandler = () => {
-        // No users selected
-        if (this.selectedAvatars.length === 0) {
-            metapress.menubar.toasts.show({ id: 'file.sharer.plugin.no.user', text: 'No users have been selected!' })
+        // If the updated item is a shared file, send a global window message so our React component can get the update
+        if (!item.name.startsWith('sharedFiles/'))
             return
-        }
 
-        // get the data
-        let data = new Blob([this.file], { type: this.file.type, name: this.file.name })
+        // Update React UI
+        window.dispatchEvent(new Event('metapress.fileSharing.update'))
 
-        // Send the file to each of the selected users
-        this.selectedAvatars.forEach(avatar => {
-            // Generate a unique ID
-            const transferID = uuidv4()
+    }
 
-            // Create a peer connection using that ID
-            this.p2pConnections[transferID] = new SimplePeer({ initiator: true })
+    /** Called when a remote peer disconnects */
+    $p2p_peerDisconnected(peer) {
 
-            // Add event listeners
-            this.p2pConnections[transferID].on('signal', data => {
-                // Send it to the remote peer
-                metapress.messaging.send(avatar.instanceID, 'fileshare.plugin.signal', {
-                    connectionID: transferID,
-                    instanceID: metapress.avatars.currentUserEntity.owner,
-                    data
+        // Send UI update event, in case the peer was hosting a file
+        window.dispatchEvent(new Event('metapress.fileSharing.update'))
+
+    }
+
+    /** Called to download a file and save it to the user's device */
+    async downloadAndSaveFile(uuid) {
+
+        // Check for existing download operation, if so stop
+        let op = this.transfers.find(op => op.fileInfo.uuid === uuid && !op.error)
+        if (op)
+            return
+
+        // Catch errors
+        try {
+            
+            // Find file
+            let fileInfo = metapress.etherealStorage.data[`sharedFiles/${uuid}`]
+            if (!fileInfo)
+                throw new Error('Unable to find file with uuid ' + uuid)
+
+            // Show progress
+            metapress.menubar.toasts.show({ 
+                id: `fileSharing.download.${uuid}`, 
+                buttonID: 'fileSharing:menuButton', 
+                text: `Downloading: Connecting...`, 
+                sticky: true 
+            })
+
+            // Download file
+            let lastUpdate = Date.now()
+            let file = await this.downloadFile(uuid, (bytesDownloaded, bytesTotal) => {
+
+                // Update progress only every 250ms to speed up the transfer
+                if (Date.now() - lastUpdate < 250) return
+                lastUpdate = Date.now()
+
+                // Update toast
+                metapress.menubar.toasts.show({ 
+                    id: `fileSharing.download.${uuid}`, 
+                    buttonID: 'fileSharing:menuButton', 
+                    text: `Downloading: ${formatFileSize(bytesDownloaded)} of ${formatFileSize(bytesTotal)}`,
+                    sticky: true,
                 })
-            })
 
-            this.p2pConnections[transferID].on('data', data => {
-                console.log('[FileSharing Plugin] Data: ', data)
+                // Update React UI
+                window.dispatchEvent(new Event('metapress.fileSharing.update'))
 
-                // use the created peer connection to send the file
-
-            })
-
-            this.p2pConnections[transferID].on('error', (err) => {
-                console.error('[FileSharing Plugin] Simple-peer connection error:', err)
-            })
-
-            this.p2pConnections[transferID].on('close', () => {
-                console.warn('[FileSharing Plugin] Simple-peer connection closed')
-                this.p2pConnections[transferID].destroy()
-                delete this.p2pConnections[transferID]
             })
             
+            // Create a download link
+            let a = document.createElement('a')
+            a.href = URL.createObjectURL(file)
+            a.download = file.name
+            a.click()
+
+            // Notify complete
+            metapress.menubar.toasts.show({ 
+                id: `fileSharing.download.${uuid}`, 
+                buttonID: 'fileSharing:menuButton', 
+                text: 'Download complete: ' + file.name, 
+                sticky: false, 
+                duration: 5000 
+            })
+
+        } catch (err) {
+
+            // Download error
+            console.error(err)
+            metapress.menubar.toasts.show({ id: `fileSharing.download.${uuid}`, buttonID: 'fileSharing:menuButton', text: 'Error downloading file: ' + err.message, sticky: false, duration: 5000 })
+
+        }
+
+        // Update React UI
+        window.dispatchEvent(new Event('metapress.fileSharing.update'))
+
+    }
+
+    /** 
+     * Called to download a file
+     * 
+     * @param {string} uuid The file UUID to download
+     * @param {(bytesDownloaded, bytesTotal) => null} progressUpdateCallback A callback to call when the download progress is updated
+     * @returns {Promise<File>} The downloaded file
+     */
+    async downloadFile(uuid, onTransferProgress) {
+
+        // Check if it's a file we shared
+        let file = this.sharedFiles.find(f => f.uuid === uuid)
+        if (file)
+            return file
+
+        // Check for existing download operation, if so wait for it to finish
+        let op = this.transfers.find(op => op.fileInfo.uuid === uuid)
+        if (op)
+            return await op.file()
+
+        // Find file
+        let fileInfo = metapress.etherealStorage.data[`sharedFiles/${uuid}`]
+        if (!fileInfo)
+            throw new Error('Unable to find file with uuid ' + uuid)
+
+        // Open socket to remote peer
+        let socket = metapress.p2p.openSocket(fileInfo.owner, 'fileSharingDownload')
         
+        // Start transfer operation
+        op = new FileTransfer()
+        op.fileID = uuid
+        op.fileInfo = fileInfo
+        op.startReceiving(socket)
+        op.onTransferProgress = onTransferProgress
+        this.transfers.push(op)
+
+        // Wait until complete
+        file = await op.file()
+
+        // Remove transfer
+        this.transfers = this.transfers.filter(t => t != op)
+
+        // Done
+        return file
+
+    }
+
+    /** Called when a remote peer wants to download a file */
+    async $p2p_socketIncoming_fileSharingDownload(socket) {
+
+        // Start transfer operation
+        new FileTransfer().startSending(socket)
+
+    }
+
+    /** Called on incoming messages */
+    $onIncomingMessage(msg) {
+        if (msg.name == 'fileSharing.fileShared') this.onFileShared(msg)
+    }
+
+    /** Called when a remote user shares a file */
+    onFileShared({ from, data }) {
+
+        // Show toast
+        metapress.menubar.toasts.show({ 
+            buttonID: `fileSharing:menuButton`, 
+            text: `File shared: ${data.name}`, 
+            duration: 5000
         })
 
-        // Display a toast
-        metapress.menubar.toasts.show({ id: 'file.sharer.plugin', text: 'Sharing uploaded file to the selected users!' })
-
-        // Reset 
-        this.file = null
-        // this.fileBuffer = [] // if using MQTT to create a new peer connection won't need that
-        this.selectedAvatars = []
-
-        // Close the panel
-        metapress.menubar.closePanel()
-
     }
-    
-    /**
-     * Send file UI
-     */
-    sendFileUI = () => {
-        return <PanelContainer title='File Sharer' onClose={() => metapress.menubar.closePanel()} >
-                {/** Display Uploaded file */}
-                <div style={{ display: 'flex', flexDirection: 'row', margin: '20px auto' }}>
-                    
-                    <img draggable='false' src={require('./images/file.png')} style={{ width: 25, height: 25, margin: '10px 20px' }} />
-                    
-                    <div style={{ fontSize: 13, margin: '15px auto', flex: '1 1 1px' }}> 
-                        { this.file.name } 
-                    </div>
-                </div>
-                
-                { metapress.avatars.users.length > 0
-                    ? <>
-                        <div style={{ fontSize: 14, fontWeight: 'bold', margin: 'auto 20px' }}> 
-                            Send To: 
-                        </div>
-
-                        {/** List of avatars in the space */}
-                        <div style={{ display: 'flex', flexDirection: 'column', margin: '10px 20px' }}>
-                            { metapress.avatars.users.map((avatar,ind) => {
-                                return <div style={{ display: 'flex', flexDirection: 'row', margin: '10px 20px' }}>
-                                
-                                    {/** Checkbox */}
-                                    <input type='checkbox' id={ind} onChange={() => this.updateSelectedAvatars(avatar,ind)} style={{ margin: 'auto 2px', width: 1, color: 'white', borderRadius: 5,width: 25, height: 25, cursor: 'pointer', backgroundColor: 'rgba(255, 255, 255, 0.1)', backgroundPosition: 'center', backgroundRepeat: 'no-repeat', backgroundSize: '14px 14px', backgroundImage: `url(${require('./images/icon-unchecked.svg')})`, border: '1px solid rgba(255, 255, 255, 0.025)', boxSizing: 'border-box' }} />
-
-                                    {/** Avatar */}
-                                    <img draggable='false' src={avatar._avatarEntity.profile_image_src} style={{ width: 30, height: 30, margin: 'auto 15px' }} />
-                                    <div style={{fontSize: 13,  margin: 'auto 5px' }}> 
-                                        { avatar.metadata.name } 
-                                    </div>
-                                
-                                </div>
-                            })}
-                        </div>
-
-                        {/** Send file button */}
-                        <div onClick={() => this.onSendHandler()} style={{ display: 'flex',  margin: '20px 40px', float: 'right', padding: '8px 12px 8px 12px',color: 'white', backgroundColor: 'rgba(255, 255, 255, 0.1)', cursor: 'pointer', borderRadius: 5, fontSize: 13, flex: '1 1 1px', justifyContent: 'center', alignItems: 'center'}} >
-                            Send
-                        </div>
-
-                    </>
-                    : <div style={{ fontSize: 14, fontWeight: 100, margin: 'auto 20px' }}> 
-                        No other users in the space to send the file to.
-                    </div>
-
-                }
-
-        </PanelContainer>
-    }
-
-}
-
-/** 
- * Container for a panel.
- * @param {object} props Panel container properties.
- * @param {string} props.title The title of the panel.
- * @param {React.ReactNode} props.children The children of the panel.
- * @param {React.CSSProperties=} props.containerStyle Additional styling to apply to the container.
- * @param {Function=} props.onClose Function to execute when the close button is clicked.
- */
-export const PanelContainer = props => {
-
-    // Return UI
-    return <>
-    
-        {/* Header */}
-        <div style={{ display: 'flex', alignItems: 'center', position: 'absolute', top: 0, left: 0, width: '100%', height: 44, borderBottom: '1px solid rgba(255, 255, 255, 0.1)' }}>
-
-            {/* Title */}
-            <div style={{ fontSize: 15, margin: '0px 20px', flex: '1 1 1px' }}> { props.title } </div>
-
-            {/* Only show close button if there is a close function */}
-            { props.onClose != null
-                ? <img draggable='false' src={require('./images/close.svg')} title='Close' style={{ width: 20, height: 20, marginRight: 15, cursor: 'pointer' }} onClick={props.onClose} />
-                : null
-            }
-
-        </div>
-
-        {/* Scrollable content */}
-        <div style={{ position: 'absolute', top: 45, left: 0, width: '100%', height: 'calc(100% - 45px)', overflowX: 'hidden', overflowY: 'auto' }} >
-            {props.children}
-        </div>
-
-    </>
 
 }
