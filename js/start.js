@@ -18,7 +18,7 @@ export default class FileSharingPlugin {
     provides        = [ 'fileSharing' ]
     requires        = [ 'menubar', 'etherealStorage' ]
 
-    /** @type {File[]} List of shared files */
+    /** @type {File[]} List of files shared by us */
     sharedFiles = []
 
     /** @type {FileTransfer[]} Active transfers */
@@ -59,7 +59,7 @@ export default class FileSharingPlugin {
 
                 // Create UI
                 panel.root = ReactDOM.createRoot(div)
-                panel.root.render(<FileSharingPanel />)
+                panel.root.render(<FileSharingPanel plugin={this} />)
 
             },
             onClose: (panel, div) => {
@@ -80,6 +80,49 @@ export default class FileSharingPlugin {
             metapress.menubar.closePanel()
         else
             this.showPanel()
+
+    }
+
+    /** Get list of all shared files by everyone */
+    get allFiles() {
+
+        // Create list of shared files
+        let files = []
+        for (let key in metapress.etherealStorage.data) {
+
+            // Check if it's ours
+            if (!key.startsWith('sharedFiles/'))
+                continue
+
+            // Check if valid
+            let file = metapress.etherealStorage.data[key]
+            if (!file || !file.uuid || !file.name || !file.size || !file.owner)
+                continue
+
+            // Check if we have a peer connection to the owner of this file
+            let peer = metapress.p2p.connections.find(c => c.instanceID == file.owner)
+            let hasPeerConnection = peer?.state == 'connected'
+
+            // Check if it's our own file
+            let isOurFile = file.owner == metapress.instanceID
+
+            // Check if we've already downloaded this file
+            let hasDownloaded = false//metapress.fileSharing.downloads[file.uuid]
+
+            // Stop if we have no connection and have not downloaded the file
+            if (!hasPeerConnection && !hasDownloaded && !isOurFile)
+                continue
+
+            // Add this file
+            files.push(file)
+
+        }
+
+        // Sort files by date, newest first
+        files.sort((a, b) => b.date - a.date)
+
+        // Done
+        return files
 
     }
 
@@ -295,5 +338,96 @@ export default class FileSharingPlugin {
         })
 
     }
+
+    /** AI knowledge base */
+    $ai_getKnowledgeBaseEntries = () => [
+
+        // Information about shared files
+        {
+            id: `${this.id}:fileList`,
+            type: 'info',
+            name: 'Currently shared files',
+            tags: 'file, files, shared files, sharing files, download file, fetch file, remove file, stop sharing file, stop sharing files, remove shared files, stop sharing all files, remove all files, ' + this.allFiles.map(f => f.name).join(', '),
+            content: `
+                Currently shared files: ${this.allFiles.length == 0 ? 'none' : ''}
+                ${this.allFiles.map(f => `- uuid=${f.uuid} fileName=${f.name} fileSizeBytes=${f.size} sharedBy=${f.ownerName} sharedByThisUser=${f.owner == metapress.instanceID}`).join('\n')}
+
+                All files are stored in memory, closing the tab will automatically unshare all files shared by this user.
+            `,
+        },
+
+        // Actions
+        {
+            id: `${this.id}:downloadFile`,
+            type: 'action',
+            name: 'Download a file',
+            tags: 'download file, fetch file, shared files, sharing files',
+            content: `
+                Assistant instruction: Run this action to download a file being shared by another user. The 'value' should be the file UUID.
+            `,
+            action: input => {
+
+                // Find file
+                let fileInfo = this.allFiles.find(f => f.uuid === input.value)
+                if (!fileInfo)
+                    throw new Error('Unable to find file with uuid ' + uuid)
+
+                // Start the download
+                this.downloadAndSaveFile(input.value)
+                return 'Download has started successfully.'
+
+            }
+        },
+
+        // Action to open the file sharing UI
+        {
+            id: `${this.id}:openFileSharingUI`,
+            type: 'action',
+            name: 'Open file sharing UI',
+            tags: `open file sharing ui, share files, sharing files`,
+            content: `
+                Assistant instruction: Run this action to open the file sharing user interface. Run this action if the user wants to share a file.
+            `,
+            action: input => {
+
+                // Open panel
+                this.showPanel()
+
+                // Done
+                return `File sharing panel has been opened. The user can now drag and drop a file to share it.`
+
+            }
+        },
+
+        // Action to remove all shared files by us
+        {
+            id: `${this.id}:stopSharingFiles`,
+            type: 'action',
+            name: 'Stop sharing files',
+            tags: `stop sharing files, remove shared files, stop sharing all files, remove all files`,
+            content: `
+                Assistant instruction: Run this action to stop sharing a single file by passing it's UUID as 'value', or all files by passing 'all' as 'value'. Run this if the user wants to stop sharing their files.
+            `,
+            action: input => {
+
+                // Stop sharing all files
+                if (input.value == 'all') {
+                    this.sharedFiles.forEach(f => this.stopSharing(f.uuid))
+                    return `All files have been stopped from being shared.`
+                }
+
+                // Stop sharing a single file
+                let file = this.sharedFiles.find(f => f.uuid === input.value)
+                if (!file)
+                    throw new Error(`File with UUID '${input.value}' not found.`)
+
+                // Stop sharing
+                this.stopSharing(input.value)
+                return `File with UUID '${input.value}' has been removed.`
+
+            }
+        },
+
+    ]
 
 }

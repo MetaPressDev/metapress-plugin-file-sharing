@@ -9,39 +9,7 @@ export const FileSharingPanel = props => {
     const [ stateCounter, setStateCounter ] = useState(0)
 
     // Create list of shared files
-    let files = []
-    for (let key in metapress.etherealStorage.data) {
-
-        // Check if it's ours
-        if (!key.startsWith('sharedFiles/'))
-            continue
-
-        // Check if valid
-        let file = metapress.etherealStorage.data[key]
-        if (!file || !file.uuid || !file.name || !file.size || !file.owner)
-            continue
-
-        // Check if we have a peer connection to the owner of this file
-        let peer = metapress.p2p.connections.find(c => c.instanceID == file.owner)
-        let hasPeerConnection = peer?.state == 'connected'
-
-        // Check if it's our own file
-        let isOurFile = file.owner == metapress.instanceID
-
-        // Check if we've already downloaded this file
-        let hasDownloaded = false//metapress.fileSharing.downloads[file.uuid]
-
-        // Stop if we have no connection and have not downloaded the file
-        if (!hasPeerConnection && !hasDownloaded && !isOurFile)
-            continue
-
-        // Add this file
-        files.push(file)
-
-    }
-
-    // Sort files by date, newest first
-    files.sort((a, b) => b.date - a.date)
+    let files = props.plugin.allFiles
 
     // Add listener for state changes from the plugin
     useEffect(() => {
